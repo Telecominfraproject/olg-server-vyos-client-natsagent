@@ -53,6 +53,21 @@ Example config file:
 config.example.yaml
 ```
 
+Config loading behavior:
+
+```text
+1. Start from built-in defaults.
+2. Load YAML values on top of those defaults.
+3. Validate final values.
+```
+
+Important rule:
+
+```text
+- Omitted fields use defaults.
+- Explicit YAML values are preserved and validated (they are not overwritten by a second default pass).
+```
+
 The agent must not hardcode NATS servers, subject patterns, KV bucket names, target name, renderer mode, apply mode, enabled actions, or state file paths in code. These values must come from YAML configuration.
 
 ## Local state
@@ -163,6 +178,52 @@ go run ./cmd/vyos-nats-agent --config ./config.example.yaml --validate-config
 ```bash
 go test -count=1 -v -tags=integration ./tests/integration/...
 ```
+
+## Binary usage
+
+The Phase 1 binary only supports configuration loading, validation, and safe effective-config printing. It does not connect to NATS yet and does not start the agent runtime.
+
+```bash
+go run ./cmd/vyos-nats-agent --config ./config.example.yaml --validate-config
+```
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--config <path>` | Path to the YAML configuration file. If omitted, the agent checks `VYOS_NATS_AGENT_CONFIG`, then falls back to `/etc/vyos-nats-agent/config.yaml`. |
+| `--validate-config` | Loads the YAML config, applies defaults, validates values, converts to `agentcore.Config`, prints `configuration valid`, and exits. |
+| `--print-effective-config` | Prints the sanitized effective YAML config after defaults and YAML overlay. Sensitive values are shown as `********`. |
+| `--help` | Shows command-line help. |
+
+### Config path resolution
+
+The config file path is resolved in this order:
+
+```text
+1. --config /path/to/config.yaml
+2. VYOS_NATS_AGENT_CONFIG=/path/to/config.yaml
+3. /etc/vyos-nats-agent/config.yaml
+```
+
+### Current Phase 1 behavior
+
+Running the binary without `--validate-config` still loads and validates the config, but only prints:
+
+```text
+phase 1 complete: config loader available; agent runtime not implemented yet
+```
+
+`--print-effective-config` prints the effective config as YAML after defaults and YAML overlay. Sensitive values are redacted as `********`, and the converted `agentcore.Config` is not printed.
+
+```bash
+go run ./cmd/vyos-nats-agent \
+  --config ./config.example.yaml \
+  --print-effective-config \
+  --validate-config
+```
+
+The runtime lifecycle, NATS connection, configure handlers, action handlers, renderer, apply engine, and local state store are intentionally not implemented in Phase 1.
 
 ## Design principle
 
