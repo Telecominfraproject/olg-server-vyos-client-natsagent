@@ -6,7 +6,11 @@ import (
 	"time"
 
 	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/apply"
 	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/configure"
+	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/state"
 )
 
 const (
@@ -20,6 +24,8 @@ type Runtime struct {
 	client     *agentcore.Client
 	logger     agentcore.Logger
 	now        func() time.Time
+
+	configureService *configure.Service
 
 	mu      sync.Mutex
 	started bool
@@ -89,12 +95,28 @@ func New(appCfg *config.AppConfig, coreCfg agentcore.Config, opts ...Option) (*R
 		return nil, fmt.Errorf("create agentcore client: %w", err)
 	}
 
+	stateStore := state.NewFileStore(appCfg.Agent.StateFile)
+	rendererEngine := renderer.NewPlaceholder()
+	applyEngine := apply.NewPlaceholder()
+	configureService, err := configure.NewService(configure.Dependencies{
+		Client:      client,
+		StateStore:  stateStore,
+		Renderer:    rendererEngine,
+		ApplyEngine: applyEngine,
+		Logger:      options.logger,
+		Now:         options.now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create configure service: %w", err)
+	}
+
 	r := &Runtime{
-		appConfig:  appCfg,
-		coreConfig: coreCfg,
-		client:     client,
-		logger:     options.logger,
-		now:        options.now,
+		appConfig:        appCfg,
+		coreConfig:       coreCfg,
+		client:           client,
+		logger:           options.logger,
+		now:              options.now,
+		configureService: configureService,
 	}
 	r.logInfo("agentcore client created", "target", r.appConfig.Agent.Target)
 	return r, nil

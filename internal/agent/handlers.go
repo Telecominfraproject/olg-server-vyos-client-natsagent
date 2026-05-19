@@ -32,38 +32,10 @@ func (r *Runtime) handleConfigure(ctx context.Context, msg agentcore.ConfigureNo
 		"rpc_id", msg.RPCID,
 		"uuid", msg.UUID,
 	)
-	r.logInfo(
-		"configure handler placeholder result publishing",
-		"target", msg.Target,
-		"rpc_id", msg.RPCID,
-		"uuid", msg.UUID,
-		"stage", "configure",
-		"status", "not_implemented",
-	)
-
-	result := agentcore.ResultEnvelope{
-		Version:     wireVersion,
-		RPCID:       msg.RPCID,
-		Target:      msg.Target,
-		CommandType: "configure",
-		UUID:        msg.UUID,
-		Result:      "failure",
-		ErrorCode:   "not_implemented",
-		Message:     "configure apply is not implemented in Phase 2",
-		Timestamp:   r.now().UTC(),
+	if r.configureService == nil {
+		return fmt.Errorf("configure service is not initialized")
 	}
-	if err := r.client.PublishResult(ctx, result); err != nil {
-		r.logError(
-			"configure handler result publish failed",
-			"target", msg.Target,
-			"rpc_id", msg.RPCID,
-			"uuid", msg.UUID,
-			"error", err,
-		)
-		return fmt.Errorf("publish configure placeholder result: %w", err)
-	}
-
-	return nil
+	return r.configureService.Handle(ctx, msg)
 }
 
 func (r *Runtime) handleAction(ctx context.Context, msg agentcore.ActionCommand) error {
@@ -90,7 +62,7 @@ func (r *Runtime) handleAction(ctx context.Context, msg agentcore.ActionCommand)
 		Action:      msg.Action,
 		Result:      "failure",
 		ErrorCode:   "not_implemented",
-		Message:     "action execution is not implemented in Phase 2",
+		Message:     "action execution is not implemented yet",
 		Timestamp:   r.now().UTC(),
 	}
 	if err := r.client.PublishResult(ctx, result); err != nil {
