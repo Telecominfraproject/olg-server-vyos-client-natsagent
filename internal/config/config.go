@@ -6,14 +6,15 @@ type AppConfig struct {
 }
 
 type AgentConfig struct {
-	Name      string         `yaml:"name"`
-	Version   string         `yaml:"version"`
-	Target    string         `yaml:"target"`
-	StateFile string         `yaml:"state_file"`
-	Logging   LoggingConfig  `yaml:"logging"`
-	Renderer  RendererConfig `yaml:"renderer"`
-	Apply     ApplyConfig    `yaml:"apply"`
-	Actions   ActionsConfig  `yaml:"actions"`
+	Name      string          `yaml:"name"`
+	Version   string          `yaml:"version"`
+	Target    string          `yaml:"target"`
+	StateFile string          `yaml:"state_file"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Configure ConfigureConfig `yaml:"configure"`
+	Debug     DebugConfig     `yaml:"debug"`
+	Apply     ApplyConfig     `yaml:"apply"`
+	Actions   ActionsConfig   `yaml:"actions"`
 }
 
 type LoggingConfig struct {
@@ -22,13 +23,18 @@ type LoggingConfig struct {
 	Format  string `yaml:"format"`
 }
 
-type RendererConfig struct {
+type ConfigureConfig struct {
 	Mode string `yaml:"mode"`
 }
 
+type DebugConfig struct {
+	LogPayloads  bool `yaml:"log_payloads"`
+	LogRendered  bool `yaml:"log_rendered"`
+	LogApplyPlan bool `yaml:"log_apply_plan"`
+}
+
 type ApplyConfig struct {
-	Mode            string `yaml:"mode"`
-	SaveAfterCommit bool   `yaml:"save_after_commit"`
+	SaveAfterCommit bool `yaml:"save_after_commit"`
 }
 
 type ActionsConfig struct {

@@ -24,11 +24,10 @@ func (c AppConfig) Validate() error {
 	default:
 		return fmt.Errorf("agent.logging.format must be one of text, json")
 	}
-	if c.Agent.Renderer.Mode != "placeholder" {
-		return fmt.Errorf("agent.renderer.mode must be placeholder")
-	}
-	if c.Agent.Apply.Mode != "placeholder" {
-		return fmt.Errorf("agent.apply.mode must be placeholder")
+	switch c.Agent.Configure.Mode {
+	case "placeholder", "real":
+	default:
+		return fmt.Errorf("agent.configure.mode must be one of placeholder, real")
 	}
 	for _, action := range c.Agent.Actions.Enabled {
 		if action != "trace" {

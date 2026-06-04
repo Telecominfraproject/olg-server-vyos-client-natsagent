@@ -10,13 +10,15 @@ vyos-nats-agent
 
 Build a minimal VyOS-focused daemon that uses `nats-agent-core` for all NATS, JetStream KV, subject, handler, result, and status communication.
 
-The first milestone must prove an end-to-end configure/action lifecycle using:
+The safe default must prove an end-to-end configure/action lifecycle using:
 
 - YAML runtime configuration
 - placeholder VyOS renderer
 - placeholder VyOS apply engine
 - placeholder `trace` action executor
 - real NATS integration tests
+
+The agent can also run a real configure backend when explicitly configured. Real mode uses `github.com/routerarchitects/olg-renderer-vyos` renderer/apply public APIs and must be validated on disposable/lab VyOS targets before production rollout.
 
 ## 3. Core architecture
 
@@ -32,6 +34,7 @@ The agent owns:
 - handler registration
 - placeholder rendering
 - placeholder apply logic
+- real configure renderer/apply adapter wiring
 - placeholder action execution
 - local applied UUID state
 - result/status publication decisions
@@ -62,8 +65,9 @@ The implementation must not hardcode:
 - subject patterns
 - target name
 - local state path
-- renderer mode
-- apply mode
+- configure backend mode
+- apply save behavior
+- debug logging flags
 - enabled actions
 - timeout values
 - retry values
@@ -112,7 +116,7 @@ agent:
   name: vyos-nats-agent
   version: 0.1.0
   target: vyos
-  state_file: /var/lib/vyos-nats-agent/state.json
+  state_file: /tmp/vyos-nats-agent/state.json
 ```
 
 Optional sections:
@@ -124,12 +128,16 @@ agent:
     level: info
     format: text
 
-  renderer:
+  configure:
     mode: placeholder
 
+  debug:
+    log_payloads: false
+    log_rendered: false
+    log_apply_plan: false
+
   apply:
-    mode: placeholder
-    save_after_commit: true
+    save_after_commit: false
 
   actions:
     enabled:
@@ -275,13 +283,15 @@ Default values:
 agent.name = vyos-nats-agent
 agent.version = 0.1.0
 agent.target = vyos
-agent.state_file = /var/lib/vyos-nats-agent/state.json
+agent.state_file = /tmp/vyos-nats-agent/state.json
 agent.logging.enabled = true
 agent.logging.level = info
 agent.logging.format = text
-agent.renderer.mode = placeholder
-agent.apply.mode = placeholder
-agent.apply.save_after_commit = true
+agent.configure.mode = placeholder
+agent.debug.log_payloads = false
+agent.debug.log_rendered = false
+agent.debug.log_apply_plan = false
+agent.apply.save_after_commit = false
 agent.actions.enabled = [trace]
 
 agentcore.nats.servers = [nats://127.0.0.1:4222]
@@ -332,8 +342,7 @@ The config loader must reject:
 - empty result subject pattern
 - empty status subject pattern
 - invalid duration strings
-- unsupported renderer mode
-- unsupported apply mode
+- unsupported configure mode
 - unsupported action names
 - unsupported logging level
 - unsupported logging format
@@ -344,10 +353,15 @@ The config loader must reject:
 For milestone 1, supported values are:
 
 ```text
-renderer.mode = placeholder
-apply.mode = placeholder
+configure.mode = placeholder | real
 actions.enabled = trace
 ```
+
+`configure.mode = placeholder` is the default and is the only mode used by normal CI smoke tests. `configure.mode = real` wires adapters around `olg-renderer-vyos/renderer` and `olg-renderer-vyos/apply`; the NATS agent must not execute raw VyOS commands directly.
+
+`agent.configure.mode` is the single source of truth for configure backend selection. `agent.apply.save_after_commit` only controls whether the real apply backend saves committed VyOS configuration.
+
+Full desired payload, rendered command, and apply-plan logging is disabled by default. It is lab/debug-only and requires `agent.logging.level = debug` plus the relevant `agent.debug.*` flag.
 
 ## 14. Runtime config package
 
@@ -391,15 +405,15 @@ Startup sequence:
 4. Validate config.
 5. Convert config to agentcore.Config.
 6. Create agentcore.Client.
-7. Create renderer implementation.
-8. Create apply engine implementation.
+7. Create renderer implementation for selected configure mode.
+8. Create apply engine implementation for selected configure mode.
 9. Create action implementations.
 10. Create local state store.
 11. Register configure handler.
 12. Register action handlers.
 13. Start agentcore.Client.
 14. Publish startup status.
-15. Run startup reconcile.
+15. Reserved for future work: run startup reconcile.
 16. Wait for SIGINT/SIGTERM.
 17. Close agentcore.Client gracefully.
 ```
@@ -420,7 +434,7 @@ When the agent receives a configure notification:
 6. If not applied:
    - pass desired payload to Renderer.Render(...)
    - pass rendered config to ApplyEngine.Apply(...)
-   - update local applied UUID after success
+   - update local applied UUID after render and apply both succeed
    - publish success result
 7. If any step fails:
    - do not update local applied UUID
@@ -467,10 +481,11 @@ type Renderer interface {
 }
 ```
 
-Milestone 1 implementation:
+Implementations:
 
 ```text
 placeholder renderer
+olg-renderer-vyos renderer adapter when configure.mode = real
 ```
 
 The placeholder renderer must not call real VyOS code.
@@ -487,13 +502,14 @@ type Engine interface {
 }
 ```
 
-Milestone 1 implementation:
+Implementations:
 
 ```text
 placeholder apply engine
+olg-renderer-vyos apply adapter when configure.mode = real
 ```
 
-The placeholder apply engine must not call real VyOS commands.
+The placeholder apply engine must not call real VyOS commands. The NATS agent must not directly execute raw VyOS shell/configuration commands; real mode delegates to the public `olg-renderer-vyos/apply` API.
 
 It may log or store the rendered config for test verification.
 
@@ -524,7 +540,7 @@ The local state file is JSON.
 Default path:
 
 ```text
-/var/lib/vyos-nats-agent/state.json
+/tmp/vyos-nats-agent/state.json
 ```
 
 State shape:
@@ -554,10 +570,10 @@ succeeds but saving local state fails, the agent reports configure failure and
 does not checkpoint the UUID. A later retry may re-process the same desired
 config.
 
-This is acceptable for the Phase 3 placeholder apply path. Before real VyOS
-apply is introduced, apply behavior should be idempotent and/or include a
-verification step so retries after state-save failure do not produce unsafe
-duplicate effects.
+Real-mode lab validation should include retry behavior around post-apply
+state-save failures before production rollout.
+
+In real mode, apply failures must prevent local state save. State save remains the configure service's responsibility, not the renderer/apply adapters' responsibility.
 
 ## 22. Result publishing
 
@@ -629,7 +645,13 @@ Minimum startup status:
 
 ## 24. Startup reconcile
 
-After `agentcore.Client.Start(ctx)`, the agent must run startup reconcile.
+Startup reconcile is required future behavior, but it is not implemented in the
+current renderer/apply integration. The current agent converges when it receives
+an explicit configure notification after the desired config has been written to
+KV.
+
+When implemented, after `agentcore.Client.Start(ctx)`, the agent should run
+startup reconcile.
 
 Minimal behavior:
 
@@ -642,7 +664,7 @@ Minimal behavior:
 
 ### Startup reconcile failure policy
 
-Startup reconcile runs after `agentcore.Client.Start(ctx)` succeeds.
+When implemented, startup reconcile should run after `agentcore.Client.Start(ctx)` succeeds.
 
 Fatal startup errors:
 - config path cannot be resolved
@@ -717,6 +739,8 @@ Use public `agentcore` APIs for controller-side behavior.
 
 ### 26.3 Startup reconcile
 
+This integration test remains deferred until startup reconcile is implemented.
+
 ```text
 1. Start real nats-server -js.
 2. Controller stores desired config through SubmitConfigure or StoreDesiredConfig.
@@ -730,6 +754,8 @@ Current repository smoke scripts:
 
 - `tests/scripts/phase3-real-nats-configure-smoke.sh`
 - `tests/scripts/phase4-real-nats-action-smoke.sh`
+
+These scripts run the placeholder-safe path. Real VyOS apply smoke tests, if added, must be manual/lab-only and guarded by an explicit opt-in flag.
 
 ## 27. Development phases
 
@@ -785,7 +811,19 @@ Implement integration tests for:
 
 - configure flow
 - action flow
-- startup reconcile/latest desired config recovery
+- startup reconcile/latest desired config recovery (deferred until startup reconcile is implemented)
+
+### Phase 6: Real configure backend
+
+Implement:
+
+- `agent.configure.mode: placeholder | real`
+- real renderer adapter using `olg-renderer-vyos/renderer`
+- real apply adapter using `olg-renderer-vyos/apply`
+- dependency on `nats-agent-core` module tag `v0.1.0`
+- dependency on `olg-renderer-vyos` module tag `v0.1.0`
+
+The core and renderer dependencies are resolved through normal Go module resolution.
 
 ## 28. Codex implementation rules
 
@@ -800,7 +838,7 @@ Codex must follow these rules:
 - Keep handlers thin.
 - Keep renderer/apply/action logic behind interfaces.
 - Keep config loader deterministic and well-tested.
-- Use placeholder implementations until explicitly asked to integrate real VyOS logic.
+- Keep placeholder implementations available unless explicitly asked to remove them.
 - Use structured errors with context.
 - Run `gofmt` on changed Go files.
 - Run `go test ./...` after each phase.
@@ -828,5 +866,5 @@ Milestone 1 is complete when:
 [ ] Agent publishes action result.
 [ ] Integration test proves configure end-to-end.
 [ ] Integration test proves action end-to-end.
-[ ] Integration test proves startup reconcile or latest desired config recovery.
+[ ] Integration test proves startup reconcile or latest desired config recovery. Deferred until startup reconcile is implemented.
 ```

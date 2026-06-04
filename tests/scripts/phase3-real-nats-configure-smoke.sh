@@ -152,7 +152,7 @@ fi
 echo "[INFO] preparing temporary config at ${TMP_CONFIG}"
 sed \
   -e "s#nats://127.0.0.1:4222#${NATS_URL}#g" \
-  -e "s#state_file: /var/lib/vyos-nats-agent/state.json#state_file: ${STATE_FILE}#g" \
+  -e "s#state_file: /tmp/vyos-nats-agent/state.json#state_file: ${STATE_FILE}#g" \
   config.example.yaml > "${TMP_CONFIG}"
 
 echo "[INFO] building vyos-nats-agent"
