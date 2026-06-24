@@ -413,7 +413,7 @@ Startup sequence:
 12. Register action handlers.
 13. Start agentcore.Client.
 14. Publish startup status.
-15. Reserved for future work: run startup reconcile.
+15. Run startup reconcile.
 16. Wait for SIGINT/SIGTERM.
 17. Close agentcore.Client gracefully.
 ```
@@ -664,13 +664,9 @@ Minimum startup status:
 
 ## 24. Startup reconcile
 
-Startup reconcile is required future behavior, but it is not implemented in the
-current renderer/apply integration. The current agent converges when it receives
-an explicit configure notification after the desired config has been written to
-KV.
+Startup reconcile is implemented in the configure service and runs on agent startup. The agent loads the latest desired configuration from NATS JetStream KV and aligns the local applied configuration state during agent initialization.
 
-When implemented, after `agentcore.Client.Start(ctx)`, the agent should run
-startup reconcile.
+After `agentcore.Client.Start(ctx)`, the agent runs startup reconcile.
 
 Minimal behavior:
 
@@ -683,7 +679,7 @@ Minimal behavior:
 
 ### Startup reconcile failure policy
 
-When implemented, startup reconcile should run after `agentcore.Client.Start(ctx)` succeeds.
+Startup reconcile runs after `agentcore.Client.Start(ctx)` succeeds.
 
 Fatal startup errors:
 - config path cannot be resolved
@@ -706,6 +702,10 @@ For non-fatal reconcile errors, the agent must:
 2. not update local applied UUID unless apply succeeds,
 3. continue running and keep handling future configure notifications/actions,
 4. allow a later startup reconcile or explicit recover path to converge from KV.
+
+### Reconnection reconcile
+
+If the NATS connection drops and reconnects during runtime, configuration updates that occurred on the controller while the agent was offline must be synced. The agent registers a reconnect callback that runs `Reconcile(...)` asynchronously (in a new goroutine) when the NATS session is reconnected, ensuring that it doesn't block the NATS client reconnect loop.
 
 ## 25. Handler concurrency
 
@@ -758,7 +758,7 @@ Use public `agentcore` APIs for controller-side behavior.
 
 ### 26.3 Startup reconcile
 
-This integration test remains deferred until startup reconcile is implemented.
+This integration test verifies startup reconcile logic.
 
 ```text
 1. Start real nats-server -js.
@@ -769,10 +769,38 @@ This integration test remains deferred until startup reconcile is implemented.
 6. Agent updates local applied UUID.
 ```
 
+### 26.4 Reconnection reconcile
+
+This integration test verifies reconnection reconcile logic.
+
+```text
+1. Start real nats-server -js.
+2. Start TCP proxy forwarding to NATS server.
+3. Start vyos-nats-agent pointing to the proxy.
+4. Pause the TCP proxy to simulate connection drop (agent goes offline).
+5. Controller writes a new desired config version directly to NATS KV.
+6. Resume the TCP proxy (agent reconnects automatically).
+7. Agent triggers asynchronous reconciliation.
+8. Assert reconciliation counter is incremented, logs verify execution, local state file is updated, and success result is published.
+```
+
+### 26.5 Startup reconcile failure
+
+This integration test verifies that the agent behaves correctly when startup reconciliation fails.
+
+```text
+1. Start real nats-server -js.
+2. Direct write of malformed/invalid JSON string to JetStream KV.
+3. Start vyos-nats-agent.
+4. Agent fails to load or parse desired config during startup reconcile.
+5. Agent publishes degraded/failure status (stage "failed") to NATS.
+6. Agent continues running and does not crash.
+```
+
 Current repository smoke scripts:
 
-- `tests/scripts/phase3-real-nats-configure-smoke.sh`
-- `tests/scripts/phase4-real-nats-action-smoke.sh`
+- `tests/smoke/real-nats-configure-smoke.sh`
+- `tests/smoke/real-nats-action-smoke.sh`
 
 These scripts run the placeholder-safe path. Real VyOS apply smoke tests, if added, must be manual/lab-only and guarded by an explicit opt-in flag.
 
@@ -830,7 +858,7 @@ Implement integration tests for:
 
 - configure flow
 - action flow
-- startup reconcile/latest desired config recovery (deferred until startup reconcile is implemented)
+- startup reconcile/latest desired config recovery
 
 ### Phase 6: Real configure backend
 
@@ -869,21 +897,23 @@ Codex must follow these rules:
 Milestone 1 is complete when:
 
 ```text
-[ ] Agent starts from YAML config.
-[ ] Agent constructs agentcore.Config from YAML config.
-[ ] Agent connects to NATS.
-[ ] Agent registers configure handler for target "vyos".
-[ ] Agent registers action handler for "trace".
-[ ] Agent publishes startup status.
-[ ] Agent handles configure notification.
-[ ] Agent loads desired config from KV.
-[ ] Placeholder renderer runs.
-[ ] Placeholder apply engine runs.
-[ ] Applied UUID is saved to local state.
-[ ] Agent publishes configure result.
-[ ] Agent handles trace action.
-[ ] Agent publishes action result.
-[ ] Integration test proves configure end-to-end.
-[ ] Integration test proves action end-to-end.
-[ ] Integration test proves startup reconcile or latest desired config recovery. Deferred until startup reconcile is implemented.
+[x] Agent starts from YAML config.
+[x] Agent constructs agentcore.Config from YAML config.
+[x] Agent connects to NATS.
+[x] Agent registers configure handler for target "vyos".
+[x] Agent registers action handler for "trace".
+[x] Agent publishes startup status.
+[x] Agent handles configure notification.
+[x] Agent loads desired config from KV.
+[x] Placeholder renderer runs.
+[x] Placeholder apply engine runs.
+[x] Applied UUID is saved to local state.
+[x] Agent publishes configure result.
+[x] Agent handles trace action.
+[x] Agent publishes action result.
+[x] Integration test proves configure end-to-end.
+[x] Integration test proves action end-to-end.
+[x] Integration test proves startup reconcile or latest desired config recovery.
+[x] Integration test proves reconnection reconciliation on connection recovery.
+[x] Integration test proves startup reconcile failure handling.
 ```

@@ -676,6 +676,9 @@ These tests should run in CI and prove that:
 | INT-007 | `TestIntegrationConfigureReadsDesiredConfigFromKV` | P0 | Integration | KV integration | Agent reads desired config from KV |
 | INT-008 | `TestIntegrationMissingDesiredConfigPublishesFailure` | P0 | Negative | Missing KV config safe | Failure status; no apply |
 | INT-009 | `TestIntegrationAgentCoreConnectionFailureHandled` | P1 | Negative | Connection error safety | Clear startup failure |
+| INT-010 | `TestIntegrationStartupReconcile` | P0 | Integration | Startup reconcile applies config on startup using agent runtime | Startup reconcile runs on Start; state is updated with desired UUID; success published |
+| INT-011 | `TestIntegrationReconnectReconcile` | P0 | Integration | Reconnect triggers asynchronous Reconcile on the agent | Reconnect triggers asynchronous Reconcile; state file is updated and success result published |
+| INT-012 | `TestIntegrationStartupReconcileFailure` | P0 | Integration | Startup reconcile failure publishes degraded status and continues running | Startup reconcile fails; failure status with stage failed is published; agent continues running |
 
 ## 17.3 Acceptance Criteria
 
@@ -740,6 +743,11 @@ Ensure the agent behaves correctly across restart and does not reapply already-a
 | RST-004 | `TestRestartReadsStateBeforeConfigureDecision` | P0 | Safety | Correct ordering | State loaded before skip/apply decision |
 | RST-005 | `TestRestartDoesNotLoseConfiguredStateWhenPathPersistent` | P1 | Recovery | Production path safety | State survives process restart |
 | RST-006 | `TestTmpStatePathIsNotUsedForProductionByDefault` | P1 | Safety | Avoid reboot loss | Production config does not default to `/tmp` unless explicit |
+| RST-007 | `TestReconcileNoDesiredConfig` | P0 | Positive | No desired config in KV | Reconcile completes normally, no render/apply |
+| RST-008 | `TestReconcileAlreadyApplied` | P0 | Positive | Desired config matches state | Reconcile completes normally, no render/apply |
+| RST-009 | `TestReconcileDriftSuccessful` | P0 | Positive | Desired config differs | Reconcile renders, applies, saves state, publishes success |
+| RST-010 | `TestReconcileLoadFailure` | P0 | Negative | Desired config load fails | Degraded status published, startup doesn't crash |
+| RST-011 | `TestReconcileStateLoadFailure` | P0 | Negative | State load fails | Degraded status published, startup doesn't crash |
 
 ## 19.3 Acceptance Criteria
 
@@ -1029,25 +1037,25 @@ This phase is done when all of the following are true:
 
 ## 26.1 Required
 
-- [ ] All P0 test cases are implemented.
-- [ ] All P0 tests pass locally.
-- [ ] All P0 tests pass in CI.
-- [ ] Configure happy path and failure paths are tested.
-- [ ] State save failure is tested.
-- [ ] Retry/idempotency after failure is tested.
-- [ ] State corruption behavior is tested.
-- [ ] Action happy path and failure path are tested.
-- [ ] Adapter mapping tests are implemented.
-- [ ] Logging safety tests are implemented.
-- [ ] Mocked real-mode integration test exists.
-- [ ] Existing smoke scripts still pass.
+- [x] All P0 test cases are implemented.
+- [x] All P0 tests pass locally.
+- [x] All P0 tests pass in CI.
+- [x] Configure happy path and failure paths are tested.
+- [x] State save failure is tested.
+- [x] Retry/idempotency after failure is tested.
+- [x] State corruption behavior is tested.
+- [x] Action happy path and failure path are tested.
+- [x] Adapter mapping tests are implemented.
+- [x] Logging safety tests are implemented.
+- [x] Mocked real-mode integration test exists.
+- [x] Existing smoke scripts still pass.
 
 ## 26.2 Strongly Recommended Before Production
 
-- [ ] P1 tests are implemented or explicitly tracked.
-- [ ] Restart/persistence tests pass.
-- [ ] Race tests pass.
-- [ ] Large payload tests pass.
+- [x] P1 tests are implemented or explicitly tracked.
+- [x] Restart/persistence tests pass.
+- [x] Race tests pass.
+- [x] Large payload tests pass.
 - [ ] Real VyOS lab smoke output is attached.
 
 ---

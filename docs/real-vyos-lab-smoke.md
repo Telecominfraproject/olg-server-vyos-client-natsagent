@@ -155,7 +155,7 @@ REAL_VYOS_LAB_ACK=I_UNDERSTAND \
 NATS_URL=nats://192.0.2.10:4222 \
 PAYLOAD_FILE=./lab/desired-vyos-wan-only-config.json \
 PRINT_LOGS_ON_PASS=true \
-./tests/scripts/real-vyos-configure-lab-smoke.sh
+./tests/lab/real-vyos-configure-smoke.sh
 ```
 
 Expected success marker:

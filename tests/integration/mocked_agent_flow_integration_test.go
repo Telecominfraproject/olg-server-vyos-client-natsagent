@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"go/build"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -21,17 +22,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 	vyosapply "github.com/Telecominfraproject/olg-renderer-vyos/apply"
 	vyosrenderer "github.com/Telecominfraproject/olg-renderer-vyos/renderer"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/actions"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/agent"
 	placeholderapply "github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/apply"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/applyvyos"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/configure"
 	internalrenderer "github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderervyos"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/testutil"
+	"github.com/nats-io/nats.go"
 )
 
 const mockedIntegrationWireVersion = "1.0"
@@ -461,6 +464,503 @@ func TestIntegrationAgentCoreConnectionFailureHandled(t *testing.T) {
 	}
 }
 
+/*
+TC-INTEGRATION-010
+Type: Integration
+Title: Startup reconcile applies latest desired config on startup using agent runtime
+Summary:
+Stores a desired config in JetStream KV, then starts the agent Runtime.
+The agent Runtime runs startup reconcile automatically on Start, rendering/applying the config,
+updating the state file, and publishing the status and result.
+
+Validates:
+  - Startup reconcile is run during agent initialization
+  - Local state is updated with the desired UUID
+  - Success status/result are published
+*/
+func TestIntegrationStartupReconcile(t *testing.T) {
+	url := startTestNATSServer(t)
+	cfg := mockedIntegrationCoreConfig(t, url)
+	target := mockedIntegrationTarget(t)
+	rpcID := "rpc-startup-reconcile"
+	uuid := "cfg-startup-reconcile"
+	payload := json.RawMessage(`{"interfaces":[{"name":"eth1","role":"lan"}]}`)
+
+	// Pre-store the desired config in JetStream KV
+	controller := newStartedClient(t, cfg, "controller")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_, err := controller.StoreDesiredConfig(ctx, agentcore.DesiredConfigRecord{
+		Version:   mockedIntegrationWireVersion,
+		RPCID:     rpcID,
+		Target:    target,
+		UUID:      uuid,
+		Payload:   payload,
+		Timestamp: mockedIntegrationNow(),
+	})
+	if err != nil {
+		t.Fatalf("failed to pre-store desired config: %v", err)
+	}
+
+	// Create test state file path
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	// Set up agent config
+	appCfg := &config.AppConfig{}
+	appCfg.Agent.Target = target
+	appCfg.Agent.StateFile = stateFile
+	appCfg.Agent.Configure.Mode = "placeholder"
+	appCfg.Agent.Logging.Level = "debug"
+	appCfg.Agent.Logging.Format = "text"
+	// Set up probe to capture published status/results
+	probe := newStartedProbe(t, cfg, target)
+
+	// Create logger that prints to standard output (stdout)
+	logger, err := agent.NewLogger(appCfg.Agent.Logging, os.Stdout)
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Create the agent Runtime passing the logger
+	runtime, err := agent.New(appCfg, cfg, agent.WithClock(mockedIntegrationNow), agent.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("failed to create agent runtime: %v", err)
+	}
+
+	// Start agent runtime
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runtime.Run(runCtx)
+	}()
+
+	// Wait for the status and result
+	statuses := probe.waitStatuses(t, rpcID, "applied")
+	result := probe.waitResult(t, rpcID, "success")
+
+	// Verify that state file exists and has correct applied UUID
+	stateBytes, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("failed to read state file: %v", err)
+	}
+	var st struct {
+		AppliedUUID string `json:"applied_uuid"`
+	}
+	if err := json.Unmarshal(stateBytes, &st); err != nil {
+		t.Fatalf("failed to unmarshal state: %v", err)
+	}
+	if st.AppliedUUID != uuid {
+		t.Fatalf("state applied_uuid got=%q want=%q", st.AppliedUUID, uuid)
+	}
+
+	assertConfigureSuccessResult(t, result, target, rpcID, uuid)
+	assertStatusCorrelation(t, statuses, target, rpcID, uuid)
+
+	// Stop runtime and check error
+	runCancel()
+	select {
+	case runErr := <-errCh:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("runtime exited with error: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime failed to stop")
+	}
+}
+
+// safeBuffer is a thread-safe bytes.Buffer wrapper that also mirrors writes to stdout.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	os.Stdout.Write(p)
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+type tcpProxy struct {
+	listener net.Listener
+	target   string
+	conns    []net.Conn
+	mu       sync.Mutex
+	closed   bool
+}
+
+func startProxy(t *testing.T, targetAddr string) *tcpProxy {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start proxy listener: %v", err)
+	}
+	p := &tcpProxy{listener: l, target: targetAddr}
+	go p.run()
+	return p
+}
+
+func (p *tcpProxy) run() {
+	for {
+		conn, err := p.listener.Accept()
+		if err != nil {
+			return
+		}
+		p.mu.Lock()
+		if p.closed {
+			conn.Close()
+			p.mu.Unlock()
+			continue
+		}
+		p.conns = append(p.conns, conn)
+		p.mu.Unlock()
+
+		go p.handle(conn)
+	}
+}
+
+func (p *tcpProxy) handle(src net.Conn) {
+	dst, err := net.Dial("tcp", p.target)
+	if err != nil {
+		src.Close()
+		return
+	}
+	p.mu.Lock()
+	if p.closed {
+		src.Close()
+		dst.Close()
+		p.mu.Unlock()
+		return
+	}
+	p.conns = append(p.conns, dst)
+	p.mu.Unlock()
+
+	go func() {
+		defer src.Close()
+		defer dst.Close()
+		_, _ = io.Copy(src, dst)
+	}()
+	go func() {
+		defer src.Close()
+		defer dst.Close()
+		_, _ = io.Copy(dst, src)
+	}()
+}
+
+func (p *tcpProxy) pause() {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	p.closeConns()
+}
+
+func (p *tcpProxy) resume() {
+	p.mu.Lock()
+	p.closed = false
+	p.mu.Unlock()
+}
+
+func (p *tcpProxy) closeConns() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.conns {
+		c.Close()
+	}
+	p.conns = nil
+}
+
+func (p *tcpProxy) close() {
+	p.closeConns()
+	p.listener.Close()
+}
+
+/*
+TC-INTEGRATION-011
+Type: Integration
+Title: Agent automatically reconciles after connection reconnects during runtime
+Summary:
+Starts NATS server, creates a TCP proxy, starts the agent pointing to the proxy,
+performs initial boot reconciliation. Then pauses the proxy to take the agent offline.
+Writes a new desired configuration to NATS KV using a controller client.
+Resumes the proxy, permitting the agent client to reconnect. Asserts that the agent
+automatically triggers reconciliation via the reconnect handler (incrementing the counter and logging),
+updates the state file, and publishes success result.
+
+Validates:
+  - Initial boot reconciliation works.
+  - Proxy pause disconnects the agent.
+  - New desired config is stored offline before reconnecting.
+  - Reconnection triggers reconciliation pass specifically from reconnect handler.
+  - State file is updated and success result published.
+*/
+func TestIntegrationReconnectReconcile(t *testing.T) {
+	natsUrl := startTestNATSServer(t)
+
+	// Resolve target NATS server IP/port
+	parts := strings.Split(natsUrl, ":")
+	natsAddr := "127.0.0.1:" + parts[len(parts)-1]
+
+	proxy := startProxy(t, natsAddr)
+	defer proxy.close()
+
+	proxyUrl := "nats://" + proxy.listener.Addr().String()
+
+	cfgAgent := mockedIntegrationCoreConfig(t, proxyUrl)
+	// Enable MaxReconnects and short ReconnectWait so reconnect happens quickly
+	cfgAgent.NATS.MaxReconnects = -1
+	cfgAgent.NATS.ReconnectWait = 100 * time.Millisecond
+
+	cfgDirect := cfgAgent
+	cfgDirect.NATS.Servers = []string{natsUrl}
+	cfgDirect.NATS.MaxReconnects = 0
+	cfgDirect.NATS.ReconnectWait = 0
+
+	target := mockedIntegrationTarget(t)
+	rpcIDInitial := "rpc-initial"
+	uuidInitial := "cfg-initial"
+	payloadInitial := json.RawMessage(`{"interfaces":[{"name":"eth1","role":"lan"}]}`)
+
+	// Pre-store the initial desired config in JetStream KV directly on NATS
+	controller := newStartedClient(t, cfgDirect, "controller")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_, err := controller.StoreDesiredConfig(ctx, agentcore.DesiredConfigRecord{
+		Version:   mockedIntegrationWireVersion,
+		RPCID:     rpcIDInitial,
+		Target:    target,
+		UUID:      uuidInitial,
+		Payload:   payloadInitial,
+		Timestamp: mockedIntegrationNow(),
+	})
+	if err != nil {
+		t.Fatalf("failed to pre-store initial desired config: %v", err)
+	}
+
+	// Create test state file path
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	// Set up agent config
+	appCfg := &config.AppConfig{}
+	appCfg.Agent.Target = target
+	appCfg.Agent.StateFile = stateFile
+	appCfg.Agent.Configure.Mode = "placeholder"
+	appCfg.Agent.Logging.Level = "debug"
+	appCfg.Agent.Logging.Format = "text"
+
+	// Create logger that captures output to logBuf
+	logBuf := &safeBuffer{}
+	logger, err := agent.NewLogger(appCfg.Agent.Logging, logBuf)
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Create the agent Runtime passing the logger
+	runtime, err := agent.New(appCfg, cfgAgent, agent.WithClock(mockedIntegrationNow), agent.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("failed to create agent runtime: %v", err)
+	}
+
+	// Start agent runtime
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runtime.Run(runCtx)
+	}()
+
+	// Wait for the initial boot reconciliation success on NATS directly
+	probe := newStartedProbe(t, cfgDirect, target)
+	probe.waitResult(t, rpcIDInitial, "success")
+
+	// Simulate NATS disconnection by pausing TCP proxy
+	proxy.pause()
+
+	// Wait a moment for client to detect disconnect
+	time.Sleep(200 * time.Millisecond)
+
+	// Write new desired config to KV directly on NATS *while* agent is offline
+	rpcIDNew := "rpc-new"
+	uuidNew := "cfg-new"
+	payloadNew := json.RawMessage(`{"interfaces":[{"name":"eth1","role":"lan"},{"name":"eth2","role":"wan"}]}`)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	_, err = controller.StoreDesiredConfig(ctx2, agentcore.DesiredConfigRecord{
+		Version:   mockedIntegrationWireVersion,
+		RPCID:     rpcIDNew,
+		Target:    target,
+		UUID:      uuidNew,
+		Payload:   payloadNew,
+		Timestamp: mockedIntegrationNow(),
+	})
+	if err != nil {
+		t.Fatalf("failed to store new desired config during offline: %v", err)
+	}
+
+	// Resume TCP proxy to let agent client reconnect
+	proxy.resume()
+
+	// Wait for the agent to reconnect and run reconnect-triggered reconciliation
+	result := probe.waitResult(t, rpcIDNew, "success")
+
+	// Verify that state file exists and has the new applied UUID
+	stateBytes, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("failed to read state file: %v", err)
+	}
+	var st struct {
+		AppliedUUID string `json:"applied_uuid"`
+	}
+	if err := json.Unmarshal(stateBytes, &st); err != nil {
+		t.Fatalf("failed to unmarshal state: %v", err)
+	}
+	if st.AppliedUUID != uuidNew {
+		t.Fatalf("state applied_uuid got=%q want=%q", st.AppliedUUID, uuidNew)
+	}
+
+	assertConfigureSuccessResult(t, result, target, rpcIDNew, uuidNew)
+
+	// Stop runtime and check error
+	runCancel()
+	select {
+	case runErr := <-errCh:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("runtime exited with error: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime failed to stop")
+	}
+
+	// Assert the reconnect handler was indeed called and triggered reconciliation specifically
+	if runtime.ReconnectReconcileCount() != 1 {
+		t.Fatalf("expected reconnect reconciliation count to be 1, got %d", runtime.ReconnectReconcileCount())
+	}
+
+	// Assert log messages guarantee that the reconciliation was triggered by the reconnect handler
+	logs := logBuf.String()
+	if !strings.Contains(logs, "reconnect detected, starting reconciliation pass") {
+		t.Fatal("expected logs to contain reconnect reconciliation start message")
+	}
+	if !strings.Contains(logs, "reconnect reconciliation pass finished") {
+		t.Fatal("expected logs to contain reconnect reconciliation finish message")
+	}
+}
+
+/*
+TC-INTEGRATION-012
+Type: Integration
+Title: Startup reconcile failure publishes degraded status and continues running
+Summary:
+Starts the NATS server, writes a malformed/invalid JSON string directly to the
+JetStream KV store for the target. Then starts the agent runtime. The agent
+should load the invalid desired config, trigger reconciliation failure, publish
+a degraded status message with Stage "failed" to NATS, and continue running safely.
+
+Validates:
+  - Agent runtime starts and does not crash when reconcile fails on startup.
+  - A failure status envelope with stage "failed" and empty RPCID is published.
+*/
+func TestIntegrationStartupReconcileFailure(t *testing.T) {
+	url := startTestNATSServer(t)
+	cfg := mockedIntegrationCoreConfig(t, url)
+	target := mockedIntegrationTarget(t)
+
+	// Direct write of malformed/invalid JSON string to NATS KV
+	nc, err := nats.Connect(url, nats.Name("mocked-integration-kv-writer"), nats.NoReconnect())
+	if err != nil {
+		t.Fatalf("failed to connect to NATS: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("failed to get JetStream: %v", err)
+	}
+
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket: cfg.KV.Bucket,
+	})
+	if err != nil {
+		t.Fatalf("failed to create KV bucket: %v", err)
+	}
+
+	// Write invalid JSON directly to desired config key (desired.<target>)
+	_, err = kv.Put("desired."+target, []byte("invalid json {{{{"))
+	if err != nil {
+		t.Fatalf("failed to put invalid json to KV: %v", err)
+	}
+
+	// Create test state file path
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	// Set up agent config
+	appCfg := &config.AppConfig{}
+	appCfg.Agent.Target = target
+	appCfg.Agent.StateFile = stateFile
+	appCfg.Agent.Configure.Mode = "placeholder"
+	appCfg.Agent.Logging.Level = "debug"
+	appCfg.Agent.Logging.Format = "text"
+
+	// Set up probe to capture published status/results
+	probe := newStartedProbe(t, cfg, target)
+
+	// Create logger that prints to standard output (stdout)
+	logger, err := agent.NewLogger(appCfg.Agent.Logging, os.Stdout)
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Create the agent Runtime passing the logger
+	runtime, err := agent.New(appCfg, cfg, agent.WithClock(mockedIntegrationNow), agent.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("failed to create agent runtime: %v", err)
+	}
+
+	// Start agent runtime
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runtime.Run(runCtx)
+	}()
+
+	// Wait for the failure status (with empty rpcID)
+	statuses := probe.waitStatuses(t, "", "failed")
+
+	var failedStatus *agentcore.StatusEnvelope
+	for _, st := range statuses {
+		if st.Stage == "failed" {
+			failedStatus = &st
+			break
+		}
+	}
+
+	if failedStatus == nil {
+		t.Fatalf("expected failure status stage failed, but did not find it in: %+v", statuses)
+	}
+	if failedStatus.Status != "failure" {
+		t.Fatalf("expected failure status status failure, got: %+v", failedStatus)
+	}
+
+	// Stop runtime and check error
+	runCancel()
+	select {
+	case runErr := <-errCh:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("runtime exited with error: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime failed to stop")
+	}
+}
+
 type configureOutcome struct {
 	statuses []agentcore.StatusEnvelope
 	result   agentcore.ResultEnvelope
@@ -859,6 +1359,12 @@ func (e *integrationActionExecutor) Calls() int {
 }
 
 func startTestNATSServer(t *testing.T) string {
+	url, stop := startTestNATSServerWithStop(t)
+	t.Cleanup(stop)
+	return url
+}
+
+func startTestNATSServerWithStop(t *testing.T) (string, func()) {
 	t.Helper()
 
 	bin, err := resolveNATSServerBinary()
@@ -891,7 +1397,11 @@ func startTestNATSServer(t *testing.T) string {
 			close(exited)
 		}()
 
+		var stopped uint32
 		stop := func() {
+			if !atomic.CompareAndSwapUint32(&stopped, 0, 1) {
+				return
+			}
 			if cmd.Process == nil {
 				return
 			}
@@ -932,8 +1442,7 @@ func startTestNATSServer(t *testing.T) string {
 			nc, err := nats.Connect(url, nats.Name("mocked-integration-ready-check"), nats.NoReconnect(), nats.Timeout(200*time.Millisecond))
 			if err == nil {
 				nc.Close()
-				t.Cleanup(stop)
-				return url
+				return url, stop
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -945,7 +1454,80 @@ func startTestNATSServer(t *testing.T) string {
 	}
 
 	t.Fatalf("nats-server did not become ready with an OS-assigned client port after trying -p 0 and -p -1\n%s", strings.Join(attemptLogs, "\n\n"))
-	return ""
+	return "", nil
+}
+
+func startTestNATSServerOnPort(t *testing.T, port string) func() {
+	t.Helper()
+
+	bin, err := resolveNATSServerBinary()
+	if err != nil {
+		t.Fatalf("nats-server binary is required for integration tests: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	var logs bytes.Buffer
+	cmd := exec.Command(bin, "-js", "-a", "127.0.0.1", "-p", port, "-sd", dataDir)
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start nats-server: %v", err)
+	}
+
+	var (
+		waitErr error
+		waitMu  sync.Mutex
+		exited  = make(chan struct{})
+	)
+	go func() {
+		err := cmd.Wait()
+		waitMu.Lock()
+		waitErr = err
+		waitMu.Unlock()
+		close(exited)
+	}()
+
+	var stopped uint32
+	stop := func() {
+		if !atomic.CompareAndSwapUint32(&stopped, 0, 1) {
+			return
+		}
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-exited:
+		case <-time.After(2 * time.Second):
+			_ = cmd.Process.Kill()
+			<-exited
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	url := "nats://127.0.0.1:" + port
+	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			waitMu.Lock()
+			err := waitErr
+			waitMu.Unlock()
+			t.Fatalf("nats-server on port %s exited before ready: %v\nlogs:\n%s", port, err, logs.String())
+		default:
+		}
+
+		nc, err := nats.Connect(url, nats.Name("mocked-integration-ready-check"), nats.NoReconnect(), nats.Timeout(200*time.Millisecond))
+		if err == nil {
+			nc.Close()
+			t.Cleanup(stop)
+			return stop
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	stop()
+	t.Fatalf("nats-server on port %s did not become ready", port)
+	return nil
 }
 
 func newStartedClient(t *testing.T, cfg agentcore.Config, name string) *agentcore.Client {
