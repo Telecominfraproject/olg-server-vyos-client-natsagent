@@ -98,7 +98,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		closeCtx, cancel := context.WithTimeout(context.Background(), startupCloseTimeout)
 		defer cancel()
 		if closeErr := r.Close(closeCtx); closeErr != nil {
-			return fmt.Errorf("startup status failed and close failed: %v: %w", closeErr, err)
+			r.logError("close failed during startup failure cleanup", "error", closeErr)
 		}
 		return err
 	}

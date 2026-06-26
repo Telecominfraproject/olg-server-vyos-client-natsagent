@@ -128,15 +128,11 @@ func TestConfigConvertsToAgentCoreConfigCorrectly(t *testing.T) {
 	if got.Timeouts.PublishTimeout != 5*time.Second ||
 		got.Timeouts.SubscribeTimeout != 6*time.Second ||
 		got.Timeouts.KVTimeout != 7*time.Second ||
-		got.Timeouts.ShutdownTimeout != 8*time.Second ||
-		got.Timeouts.HandlerWarnAfter != 9*time.Second {
+		got.Timeouts.ShutdownTimeout != 8*time.Second {
 		t.Fatalf("timeout mapping mismatch: %+v", got.Timeouts)
 	}
 	if got.Retry.PublishAttempts != 4 || got.Retry.PublishBackoff != 250*time.Millisecond {
 		t.Fatalf("retry mapping mismatch: %+v", got.Retry)
-	}
-	if got.Execution.HandlerMode != "sync" {
-		t.Fatalf("execution handler mode got=%q want=sync", got.Execution.HandlerMode)
 	}
 	if len(cfg.Agent.Actions.Enabled) != 1 || cfg.Agent.Actions.Enabled[0] != "trace" {
 		t.Fatalf("action settings should remain available on app config, got=%v", cfg.Agent.Actions.Enabled)

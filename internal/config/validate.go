@@ -29,10 +29,15 @@ func (c AppConfig) Validate() error {
 	default:
 		return fmt.Errorf("agent.configure.mode must be one of placeholder, real")
 	}
+	seenActions := make(map[string]bool)
 	for _, action := range c.Agent.Actions.Enabled {
 		if action != "trace" {
 			return fmt.Errorf("agent.actions.enabled contains unsupported action %q", action)
 		}
+		if seenActions[action] {
+			return fmt.Errorf("agent.actions.enabled contains duplicate action %q", action)
+		}
+		seenActions[action] = true
 	}
 
 	if len(c.AgentCore.NATS.Servers) == 0 {

@@ -202,12 +202,20 @@ func TestHandleSuccessPublishesStatusesAndSuccessResult(t *testing.T) {
 	}
 
 	wantStages := []string{"received", "executing", "completed"}
+	wantMessages := []string{
+		"action command received",
+		"executing trace action",
+		"trace action completed",
+	}
 	if len(client.statuses) != len(wantStages) {
 		t.Fatalf("status count got=%d want=%d", len(client.statuses), len(wantStages))
 	}
 	for i, stage := range wantStages {
 		if client.statuses[i].Stage != stage {
 			t.Fatalf("status[%d].stage got=%q want=%q", i, client.statuses[i].Stage, stage)
+		}
+		if client.statuses[i].Message != wantMessages[i] {
+			t.Fatalf("status[%d].message got=%q want=%q", i, client.statuses[i].Message, wantMessages[i])
 		}
 	}
 

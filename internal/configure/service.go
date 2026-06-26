@@ -140,11 +140,10 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 
 	if localState.AppliedUUID == desired.Record.UUID {
 		s.logInfo("configure already in sync", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "already_in_sync", "status", "success")
-		if err := s.publishStatus(ctx, msg, "success", "already_in_sync", "desired config already applied"); err != nil {
-			return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status already_in_sync: %w", err))
-		}
-		if err := s.publishSuccessResult(ctx, msg, "desired config already applied"); err != nil {
-			return s.fail(ctx, msg, "result_publish_failed", "failed to publish configure result", fmt.Errorf("publish configure already-in-sync result: %w", err))
+		statusErr := s.publishStatus(ctx, msg, "success", "already_in_sync", "desired config already applied")
+		resultErr := s.publishSuccessResult(ctx, msg, "desired config already applied")
+		if statusErr != nil || resultErr != nil {
+			return s.reportingFailure(msg, errors.Join(statusErr, resultErr))
 		}
 		return nil
 	}

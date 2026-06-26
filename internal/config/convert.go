@@ -35,10 +35,6 @@ func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 	if err != nil {
 		return agentcore.Config{}, err
 	}
-	handlerWarnAfter, err := parseDurationField("agentcore.timeouts.handler_warn_after", c.AgentCore.Timeouts.HandlerWarnAfter, false)
-	if err != nil {
-		return agentcore.Config{}, err
-	}
 	publishBackoff, err := parseDurationField("agentcore.retry.publish_backoff", c.AgentCore.Retry.PublishBackoff, false)
 	if err != nil {
 		return agentcore.Config{}, err
@@ -97,14 +93,10 @@ func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 			SubscribeTimeout: subscribeTimeout,
 			KVTimeout:        kvTimeout,
 			ShutdownTimeout:  shutdownTimeout,
-			HandlerWarnAfter: handlerWarnAfter,
 		},
 		Retry: agentcore.RetryConfig{
 			PublishAttempts: c.AgentCore.Retry.PublishAttempts,
 			PublishBackoff:  publishBackoff,
-		},
-		Execution: agentcore.ExecutionConfig{
-			HandlerMode: c.AgentCore.Execution.HandlerMode,
 		},
 	}, nil
 }

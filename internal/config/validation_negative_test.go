@@ -196,3 +196,28 @@ agent:
 		})
 	}
 }
+
+/*
+TC-CONFIG-VALIDATE-011
+Type: Negative
+Title: Duplicate action fails validation
+Summary:
+Asserts that configurations containing duplicate action names fail validation.
+
+Validates:
+  - duplicate action returns error
+  - error identifies duplicate action
+*/
+func TestConfigDuplicateActionFailsValidation(t *testing.T) {
+	cfg := DefaultAppConfig()
+	cfg.Agent.Actions.Enabled = []string{"trace", "trace"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate action") || !strings.Contains(err.Error(), "trace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+

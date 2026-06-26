@@ -993,3 +993,44 @@ func TestHandleDoesNotLogRawDesiredPayload(t *testing.T) {
 		t.Fatal("secret payload content leaked to logs")
 	}
 }
+
+/*
+TC-CONFIGURE-SERVICE-019
+Type: Safety
+Title: Handle returns reporting error when status or result publish fails during already-in-sync
+Summary:
+Verifies that if publishStatus or publishSuccessResult fails during an already-in-sync scenario,
+it triggers reportingFailure instead of publishing/returning a contradictory failure result.
+
+Validates:
+  - configure already in sync triggers reportingFailure on status/result publish failure
+  - returns non-nil reporting error
+  - does not publish a failure result
+*/
+func TestHandleAlreadyInSyncPublishFailure(t *testing.T) {
+	msg := agentcore.ConfigureNotification{Version: "1.0", RPCID: "rpc-sync-fail", Target: "vyos", UUID: "cfg-sync-fail"}
+
+	client := &fakeConfigureClient{
+		desired:          newDesired("vyos", "cfg-sync-fail"),
+		statusErrByStage: map[string]error{"already_in_sync": errors.New("publish already_in_sync status failed")},
+	}
+	store := &fakeStateStore{loadState: state.State{AppliedUUID: "cfg-sync-fail"}}
+	rndr := &fakeRenderer{}
+	apply := &fakeApplyEngine{}
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+
+	err := svc.Handle(context.Background(), msg)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "apply succeeded but reporting failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify that NO failure result was published
+	for _, res := range client.results {
+		if res.Result == "failure" {
+			t.Fatalf("unexpected failure result published: %+v", res)
+		}
+	}
+}
+

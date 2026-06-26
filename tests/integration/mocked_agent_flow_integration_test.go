@@ -1021,14 +1021,10 @@ func mockedIntegrationCoreConfig(t *testing.T, url string) agentcore.Config {
 			SubscribeTimeout: 2 * time.Second,
 			KVTimeout:        2 * time.Second,
 			ShutdownTimeout:  2 * time.Second,
-			HandlerWarnAfter: 500 * time.Millisecond,
 		},
 		Retry: agentcore.RetryConfig{
 			PublishAttempts: 1,
 			PublishBackoff:  50 * time.Millisecond,
-		},
-		Execution: agentcore.ExecutionConfig{
-			HandlerMode: "sync",
 		},
 	}
 }
