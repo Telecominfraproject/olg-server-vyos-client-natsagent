@@ -3,9 +3,9 @@ module github.com/Telecominfraproject/olg-server-vyos-client-natsagent
 go 1.25.0
 
 require (
-	github.com/nats-io/nats.go v1.51.0
 	github.com/Telecominfraproject/olg-nats-agent-core v0.1.0
 	github.com/Telecominfraproject/olg-renderer-vyos v0.1.0
+	github.com/nats-io/nats.go v1.51.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

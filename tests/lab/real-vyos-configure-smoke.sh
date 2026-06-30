@@ -127,11 +127,16 @@ REMOTE_AGENT_LOG="${REMOTE_AGENT_LOG:-/tmp/vyos-nats-agent.log}"
 VYOS_SHOW_CONFIG_COMMAND="${VYOS_SHOW_CONFIG_COMMAND:-show configuration commands}"
 KEEP_WORK_DIR="${KEEP_WORK_DIR:-false}"
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vyos-nats-agent-real-lab-XXXXXX")"
+mkdir -p "${ROOT_DIR}/.tmp"
+WORK_DIR="$(mktemp -d "${ROOT_DIR}/.tmp/vyos-nats-agent-real-lab-XXXXXX")"
+TMP_CONFIG="${WORK_DIR}/controller-config.yaml"
+# Make WORK_DIR path absolute so relative path context is preserved
+WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
 TMP_CONFIG="${WORK_DIR}/controller-config.yaml"
 CONTROLLER_DIR="${WORK_DIR}/controller"
 CONTROLLER_LOG="${ARTIFACT_DIR}/controller.log"
 AGENT_LOG="${ARTIFACT_DIR}/agent.log"
+
 
 cleanup() {
   set +e
