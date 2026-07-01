@@ -556,3 +556,55 @@ func TestVyOSTraceExecutorLargeUploadStreaming(t *testing.T) {
 		t.Fatalf("expected %d bytes, got %d", len(data), receivedBytes)
 	}
 }
+
+/*
+TC-ACTIONS-TRACE-009
+Type: Negative
+Title: Upload timeout enforcement during trace execution
+Summary:
+Simulates a slow remote HTTP server that delays its response during trace upload.
+Asserts that the executor times out according to the configured uploadTimeout duration,
+and ensures that the temporary PCAP file is still cleaned up correctly.
+Validates:
+  - HTTP upload cancels when uploadTimeout is exceeded
+  - local PCAP file cleanup occurs on upload timeout
+*/
+func TestVyOSTraceExecutorUploadTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	runner := &fakeCommandRunner{}
+	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec.uploadTimeout = 50 * time.Millisecond
+
+	msg := agentcore.ActionCommand{
+		Version: "1.0",
+		RPCID:   "rpc-trace-timeout",
+		Target:  "vyos",
+		Action:  ActionTrace,
+		Payload: json.RawMessage(`{
+			"interface": "eth0",
+			"duration": 5,
+			"uri": "` + server.URL + `"
+		}`),
+		Timestamp: time.Now(),
+	}
+
+	_, err := exec.Execute(context.Background(), msg)
+	if err == nil {
+		t.Fatal("expected upload timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Verify local cleanup happens even on upload timeouts
+	if runner.lastPcapPath != "" {
+		if _, err := os.Stat(runner.lastPcapPath); !os.IsNotExist(err) {
+			t.Fatalf("expected pcap file to be cleaned up on timeout, stat returned: %v", err)
+		}
+	}
+}

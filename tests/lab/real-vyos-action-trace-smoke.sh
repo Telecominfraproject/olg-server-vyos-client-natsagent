@@ -86,7 +86,10 @@ UPLOAD_HOST="${UPLOAD_HOST:-}"
 REMOTE_AGENT_LOG="${REMOTE_AGENT_LOG:-/tmp/vyos-nats-agent.log}"
 KEEP_WORK_DIR="${KEEP_WORK_DIR:-false}"
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vyos-nats-agent-real-trace-lab-XXXXXX")"
+mkdir -p "${ROOT_DIR}/.tmp"
+WORK_DIR="$(mktemp -d "${ROOT_DIR}/.tmp/vyos-nats-agent-real-trace-lab-XXXXXX")"
+# Make WORK_DIR path absolute so relative path context is preserved
+WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
 TMP_CONFIG="${WORK_DIR}/controller-config.yaml"
 CONTROLLER_DIR="${WORK_DIR}/controller"
 CONTROLLER_LOG="${ARTIFACT_DIR}/controller.log"
@@ -244,8 +247,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 )
 
 func main() {

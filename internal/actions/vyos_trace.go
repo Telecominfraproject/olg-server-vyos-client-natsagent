@@ -58,8 +58,9 @@ func (r *RealCommandRunner) Command(ctx context.Context, name string, args ...st
 }
 
 type VyOSTraceExecutor struct {
-	runner CommandRunner
-	client *http.Client
+	runner        CommandRunner
+	client        *http.Client
+	uploadTimeout time.Duration
 }
 
 func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceExecutor {
@@ -67,8 +68,9 @@ func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceE
 		client = http.DefaultClient
 	}
 	return &VyOSTraceExecutor{
-		runner: runner,
-		client: client,
+		runner:        runner,
+		client:        client,
+		uploadTimeout: 30 * time.Second,
 	}
 }
 
@@ -212,6 +214,9 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 }
 
 func (e *VyOSTraceExecutor) uploadFile(ctx context.Context, uri, filePath string) error {
+	uploadCtx, cancel := context.WithTimeout(ctx, e.uploadTimeout)
+	defer cancel()
+
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
@@ -246,7 +251,7 @@ func (e *VyOSTraceExecutor) uploadFile(ctx context.Context, uri, filePath string
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", uri, pr)
+	req, err := http.NewRequestWithContext(uploadCtx, "POST", uri, pr)
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
 	}

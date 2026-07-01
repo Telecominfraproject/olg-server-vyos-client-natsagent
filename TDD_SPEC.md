@@ -525,6 +525,7 @@ These test cases specifically target the real `VyOSTraceExecutor` implementation
 | TC-ACTIONS-TRACE-006 | `TestVyOSTraceExecutorParameterBounds` | P0 | Negative | Enforces duration and packets parameter boundaries | Reject negative values and values exceeding maximum limits (300s, 10000 packets) |
 | TC-ACTIONS-TRACE-007 | `TestVyOSTraceExecutorInterfaceValidation` | P0 | Safety | Validates interface name against command injection | Rejects dots, slashes, or special shell chars; allows ethX/bondX/vlanX/etc |
 | TC-ACTIONS-TRACE-008 | `TestVyOSTraceExecutorLargeUploadStreaming` | P0 | Positive | Streaming multipart upload functionality | Large file upload streams successfully using zero-copy pipeline |
+| TC-ACTIONS-TRACE-009 | `TestVyOSTraceExecutorUploadTimeout` | P0 | Negative | Enforces configured uploadTimeout for file upload | PCAP file cleaned up; upload cancels when uploadTimeout exceeded |
 
 ## 13.4 Acceptance Criteria
 
