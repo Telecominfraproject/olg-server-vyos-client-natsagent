@@ -1037,3 +1037,279 @@ func TestHandleAlreadyInSyncPublishFailure(t *testing.T) {
 		}
 	}
 }
+
+/*
+TC-RECONCILE-001
+Type: Positive
+Title: Reconcile continues normally when no desired config exists in KV
+Summary:
+Runs the reconcile flow when the NATS KV store does not contain any desired
+configuration record for the target. The reconcile process should complete
+normally without attempting to render or apply any configuration.
+
+Validates:
+  - no error is returned
+  - renderer is not called
+  - apply engine is not called
+*/
+func TestReconcileNoDesiredConfig(t *testing.T) {
+	client := &fakeConfigureClient{
+		loadErr: &agentcore.Error{Code: agentcore.CodeConfigNotFound},
+	}
+	store := &fakeStateStore{
+		loadState: state.State{AppliedUUID: "cfg-1"},
+	}
+	rndr := &fakeRenderer{}
+	apply := &fakeApplyEngine{}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	err := svc.Reconcile(context.Background(), "vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if rndr.calls != 0 || apply.calls != 0 {
+		t.Fatalf("expected 0 render/apply calls, got render=%d apply=%d", rndr.calls, apply.calls)
+	}
+}
+
+/*
+TC-RECONCILE-002
+Type: Positive
+Title: Reconcile does nothing when desired config matches local state
+Summary:
+Runs the reconcile flow when the desired configuration UUID loaded from KV
+matches the local applied UUID. The reconcile process should complete normally
+without re-rendering or re-applying the config.
+
+Validates:
+  - no error is returned
+  - renderer is not called
+  - apply engine is not called
+*/
+func TestReconcileAlreadyApplied(t *testing.T) {
+	desired := newDesired("vyos", "cfg-1")
+	client := &fakeConfigureClient{
+		desired: desired,
+	}
+	store := &fakeStateStore{
+		loadState: state.State{Target: "vyos", AppliedUUID: "cfg-1"},
+	}
+	rndr := &fakeRenderer{}
+	apply := &fakeApplyEngine{}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	err := svc.Reconcile(context.Background(), "vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if rndr.calls != 0 || apply.calls != 0 {
+		t.Fatalf("expected 0 render/apply calls, got render=%d apply=%d", rndr.calls, apply.calls)
+	}
+}
+
+/*
+TC-RECONCILE-003
+Type: Positive
+Title: Reconcile applies config when there is configuration drift
+Summary:
+Runs the reconcile flow when the desired configuration UUID loaded from KV
+differs from the local applied UUID. The configure service should render the desired
+configuration, apply it, update the state store with the new UUID, and publish
+status/results envelopes.
+
+Validates:
+  - no error is returned
+  - renderer is called exactly once
+  - apply engine is called exactly once
+  - state store is updated with the new applied UUID
+  - success status and result envelopes are published
+*/
+func TestReconcileDriftSuccessful(t *testing.T) {
+	desired := newDesired("vyos", "cfg-new")
+	desired.Record.RPCID = "rpc-reconcile"
+	desired.Bucket = "bucket-1"
+	desired.Key = "key-1"
+	client := &fakeConfigureClient{
+		desired: desired,
+	}
+	store := &fakeStateStore{
+		loadState: state.State{AppliedUUID: "cfg-old"},
+	}
+	rndr := &fakeRenderer{
+		output: renderer.Output{Target: "vyos", UUID: "cfg-new", Text: "set system host-name new\n"},
+	}
+	apply := &fakeApplyEngine{}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	err := svc.Reconcile(context.Background(), "vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if rndr.calls != 1 || apply.calls != 1 {
+		t.Fatalf("expected 1 render and apply call, got render=%d apply=%d", rndr.calls, apply.calls)
+	}
+	if store.saveCalls != 1 || store.saved[0].AppliedUUID != "cfg-new" {
+		t.Fatalf("expected state saved with cfg-new, saveCalls=%d state=%+v", store.saveCalls, store.saved)
+	}
+	// Assert status and results were published
+	if len(client.statuses) == 0 {
+		t.Fatal("expected status envelopes to be published")
+	}
+	if len(client.results) != 1 || client.results[0].Result != "success" {
+		t.Fatalf("expected success result, got: %+v", client.results)
+	}
+}
+
+/*
+TC-RECONCILE-004
+Type: Negative
+Title: Reconcile publishes degraded status on loading failure
+Summary:
+Runs the reconcile flow when loading the desired configuration from KV fails with
+an error (e.g. timeout). The reconcile process should capture the error, publish
+a failed status message, and return the error.
+
+Validates:
+  - error is returned
+  - a failure status envelope with stage "failed" is published
+*/
+func TestReconcileLoadFailure(t *testing.T) {
+	client := &fakeConfigureClient{
+		loadErr: errors.New("timeout or network failure"),
+	}
+	store := &fakeStateStore{
+		loadState: state.State{AppliedUUID: "cfg-1"},
+	}
+	rndr := &fakeRenderer{}
+	apply := &fakeApplyEngine{}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	err := svc.Reconcile(context.Background(), "vyos")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if len(client.statuses) != 1 || client.statuses[0].Stage != "failed" {
+		t.Fatalf("expected failure status, got statuses: %+v", client.statuses)
+	}
+}
+
+/*
+TC-RECONCILE-005
+Type: Negative
+Title: Reconcile publishes degraded status on state load failure
+Summary:
+Runs the reconcile flow when loading the local state store fails with an error.
+The reconcile process should handle the error, publish a failed status,
+and return the error.
+
+Validates:
+  - error is returned
+  - a failure status envelope with stage "failed" is published
+*/
+func TestReconcileStateLoadFailure(t *testing.T) {
+	client := &fakeConfigureClient{
+		desired: newDesired("vyos", "cfg-1"),
+	}
+	store := &fakeStateStore{
+		loadErr: errors.New("file system read error"),
+	}
+	rndr := &fakeRenderer{}
+	apply := &fakeApplyEngine{}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	err := svc.Reconcile(context.Background(), "vyos")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if len(client.statuses) != 1 || client.statuses[0].Stage != "failed" {
+		t.Fatalf("expected failure status, got statuses: %+v", client.statuses)
+	}
+}
+
+/*
+TC-CONFIGURE-SERVICE-018
+Type: Positive
+Title: Reconcile serializes concurrent configure processing with Handle
+Summary:
+Starts a Handle call and a Reconcile call concurrently. While Handle is blocked in renderer,
+Reconcile must be blocked and must not enter render/apply/save before Handle is released.
+
+Validates:
+  - Reconcile is serialized and blocked by Handle on service mutex.
+*/
+func TestReconcileSerializesConcurrentConfigureProcessing(t *testing.T) {
+	firstRelease := make(chan struct{})
+	firstRenderEntered := make(chan struct{})
+	secondRenderEntered := make(chan struct{})
+	secondStarted := make(chan struct{})
+	applyCh := make(chan string, 2)
+	saveCh := make(chan string, 2)
+
+	client := &fakeConfigureClient{
+		desiredByTarget: map[string]*agentcore.StoredDesiredConfig{
+			"vyos":   newDesired("vyos", "cfg-15-a"),
+			"vyos-r": newDesired("vyos", "cfg-15-b"),
+		},
+		desired: newDesired("vyos", "cfg-15-b"),
+	}
+	store := &fakeStateStore{
+		saveCh:    saveCh,
+		loadState: state.State{AppliedUUID: "cfg-old"},
+	}
+	rndr := &blockingRenderer{
+		firstEntered:  firstRenderEntered,
+		secondEntered: secondRenderEntered,
+		releaseFirst:  firstRelease,
+	}
+	apply := &fakeApplyEngine{applyCh: applyCh}
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+
+	msg1 := agentcore.ConfigureNotification{Version: "1.0", RPCID: "rpc-15-a", Target: "vyos", UUID: "cfg-15-a"}
+	errCh := make(chan error, 2)
+
+	go func() {
+		errCh <- svc.Handle(context.Background(), msg1)
+	}()
+
+	select {
+	case <-firstRenderEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Handle did not enter renderer")
+	}
+
+	go func() {
+		close(secondStarted)
+		errCh <- svc.Reconcile(context.Background(), "vyos")
+	}()
+
+	select {
+	case <-secondStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Reconcile did not start")
+	}
+
+	select {
+	case <-secondRenderEntered:
+		t.Fatal("Reconcile entered renderer before Handle release")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(firstRelease)
+
+	select {
+	case <-secondRenderEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Reconcile did not enter renderer after Handle release")
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	if rndr.calls != 2 || apply.calls != 2 || store.saveCalls != 2 {
+		t.Fatalf("calls renderer=%d apply=%d save=%d want 2/2/2", rndr.calls, apply.calls, store.saveCalls)
+	}
+}
